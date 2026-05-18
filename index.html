@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RPGSave 加解密转换器</title>
+<script src="https://cdn.jsdelivr.net/npm/lz-string@1.5.0/libs/lz-string.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px; }
+.container { width: 100%; max-width: 700px; }
+h1 { text-align: center; margin-bottom: 30px; color: #e94560; font-size: 1.6em; }
+.card { background: #16213e; border-radius: 12px; padding: 24px; margin-bottom: 20px; border: 1px solid #0f3460; }
+.card h2 { font-size: 1.15em; margin-bottom: 16px; color: #53d8fb; display: flex; align-items: center; gap: 8px; }
+.card h2 .icon { font-size: 1.4em; }
+.upload-area { border: 2px dashed #0f3460; border-radius: 10px; padding: 40px 20px; text-align: center; cursor: pointer; transition: all .2s; background: #1a1a2e; }
+.upload-area:hover, .upload-area.drag-over { border-color: #53d8fb; background: #1a2744; }
+.upload-area p { color: #888; margin-top: 8px; font-size: .85em; }
+.upload-area .main-text { color: #ccc; font-size: 1em; }
+input[type="file"] { display: none; }
+.file-info { margin-top: 12px; padding: 10px 14px; background: #1a1a2e; border-radius: 8px; font-size: .85em; color: #53d8fb; display: none; }
+.file-info.show { display: block; }
+.btn { display: block; width: 100%; padding: 12px; border: none; border-radius: 8px; font-size: 1em; cursor: pointer; font-weight: bold; transition: all .2s; margin-top: 14px; }
+.btn-decrypt { background: #e94560; color: #fff; }
+.btn-decrypt:hover { background: #c23152; }
+.btn-encrypt { background: #53d8fb; color: #1a1a2e; }
+.btn-encrypt:hover { background: #3dc0e0; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.msg { margin-top: 12px; padding: 10px 14px; border-radius: 8px; font-size: .85em; display: none; }
+.msg.success { display: block; background: #0a3d2e; color: #5eeab0; border: 1px solid #1a6b4a; }
+.msg.error { display: block; background: #3d0a0a; color: #ff6b6b; border: 1px solid #6b1a1a; }
+.note { margin-top: 16px; font-size: .75em; color: #666; text-align: center; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>RPGSave 加解密转换器</h1>
+
+    <!-- Decrypt: rpgsave → txt -->
+    <div class="card">
+        <h2><span class="icon">🔓</span>解密：rpgsave → 可读文本</h2>
+        <div class="upload-area" id="decryptDropZone">
+            <p class="main-text">拖拽 .rpgsave 文件到此处</p>
+            <p>或点击选择文件</p>
+            <input type="file" id="decryptInput" accept=".rpgsave">
+        </div>
+        <div class="file-info" id="decryptFileInfo"></div>
+        <button class="btn btn-decrypt" id="decryptBtn" disabled>解密并下载 txt</button>
+        <div class="msg" id="decryptMsg"></div>
+    </div>
+
+    <!-- Encrypt: txt → rpgsave -->
+    <div class="card">
+        <h2><span class="icon">🔒</span>加密：txt → rpgsave</h2>
+        <div class="upload-area" id="encryptDropZone">
+            <p class="main-text">拖拽 解密后的 .txt 文件到此处</p>
+            <p>或点击选择文件</p>
+            <input type="file" id="encryptInput" accept=".txt">
+        </div>
+        <div class="file-info" id="encryptFileInfo"></div>
+        <button class="btn btn-encrypt" id="encryptBtn" disabled>加密并下载 rpgsave</button>
+        <div class="msg" id="encryptMsg"></div>
+    </div>
+
+    <p class="note">
+        支持的格式：JSON元数据 + ###SAVEDATA### + LZ-String Base64 压缩数据<br>
+        所有处理均在浏览器本地完成，不会上传到任何服务器
+    </p>
+</div>
+
+<script>
+// ── DOM elements ──
+const $ = id => document.getElementById(id);
+const decryptDrop = $('decryptDropZone');
+const decryptInput = $('decryptInput');
+const decryptFileInfo = $('decryptFileInfo');
+const decryptBtn = $('decryptBtn');
+const decryptMsg = $('decryptMsg');
+const encryptDrop = $('encryptDropZone');
+const encryptInput = $('encryptInput');
+const encryptFileInfo = $('encryptFileInfo');
+const encryptBtn = $('encryptBtn');
+const encryptMsg = $('encryptMsg');
+
+let decryptFile = null;
+let encryptFile = null;
+
+// ── Drag & Drop helpers ──
+function setupDrop(dropZone, fileInput, onFile) {
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        dropZone.classList.remove('drag-over');
+        const files = e.dataTransfer.files;
+        if (files.length) onFile(files[0]);
+    });
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files.length) onFile(fileInput.files[0]);
+    });
+}
+
+// ── Decrypt side ──
+setupDrop(decryptDrop, decryptInput, file => {
+    decryptFile = file;
+    decryptFileInfo.textContent = `已选择: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+    decryptFileInfo.classList.add('show');
+    decryptBtn.disabled = false;
+    decryptMsg.className = 'msg';
+});
+
+decryptBtn.addEventListener('click', async () => {
+    decryptMsg.className = 'msg';
+    try {
+        const text = await decryptFile.text();
+        const sep = '###SAVEDATA###';
+        const idx = text.indexOf(sep);
+        if (idx === -1) throw new Error('未找到 SAVEDATA 分隔符，不是有效的 rpgsave 文件');
+
+        const jsonMeta = text.substring(0, idx);
+        const base64Data = text.substring(idx + sep.length);
+
+        // Validate metadata JSON
+        let meta;
+        try { meta = JSON.parse(jsonMeta); } catch (e) { throw new Error('元数据 JSON 解析失败: ' + e.message); }
+
+        // Decompress
+        const decrypted = LZString.decompressFromBase64(base64Data);
+        if (!decrypted) throw new Error('LZ-String Base64 解压失败，数据可能已损坏');
+
+        // Validate game data JSON
+        let gameData;
+        try { gameData = JSON.parse(decrypted); } catch (e) { throw new Error('游戏数据 JSON 解析失败: ' + e.message); }
+
+        // Build output
+        let output = '========== 存档元数据 ==========\n';
+        output += JSON.stringify(meta, null, 2);
+        output += '\n\n========== 解密后的游戏数据 ==========\n';
+        output += JSON.stringify(gameData, null, 2);
+
+        // Download
+        const baseName = decryptFile.name.replace(/\.rpgsave$/i, '');
+        download(output, baseName + '----解密.txt', 'text/plain;charset=utf-8');
+
+        decryptMsg.textContent = '解密成功！文件已下载。';
+        decryptMsg.className = 'msg success';
+    } catch (e) {
+        decryptMsg.textContent = '错误: ' + e.message;
+        decryptMsg.className = 'msg error';
+    }
+});
+
+// ── Encrypt side ──
+setupDrop(encryptDrop, encryptInput, file => {
+    encryptFile = file;
+    encryptFileInfo.textContent = `已选择: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+    encryptFileInfo.classList.add('show');
+    encryptBtn.disabled = false;
+    encryptMsg.className = 'msg';
+});
+
+encryptBtn.addEventListener('click', async () => {
+    encryptMsg.className = 'msg';
+    try {
+        const text = await encryptFile.text();
+
+        // Extract metadata and game data from the decrypted txt
+        const metaMarker = '========== 存档元数据 ==========\n';
+        const gameMarker = '\n\n========== 解密后的游戏数据 ==========\n';
+
+        const metaStart = text.indexOf(metaMarker);
+        const gameStart = text.indexOf(gameMarker);
+
+        if (metaStart === -1 || gameStart === -1) {
+            throw new Error('txt 格式不正确，缺少元数据或游戏数据标记');
+        }
+
+        const metaJson = text.substring(metaStart + metaMarker.length, gameStart).trim();
+        const gameJson = text.substring(gameStart + gameMarker.length).trim();
+
+        // Validate both JSON sections
+        let meta, gameData;
+        try { meta = JSON.parse(metaJson); } catch (e) { throw new Error('元数据 JSON 解析失败: ' + e.message); }
+        try { gameData = JSON.parse(gameJson); } catch (e) { throw new Error('游戏数据 JSON 解析失败: ' + e.message); }
+
+        // Compress
+        const compressed = LZString.compressToBase64(gameJson);
+        if (!compressed) throw new Error('LZ-String 压缩失败');
+
+        // Build rpgsave: raw JSON metadata (no pretty-print) + separator + compressed
+        const rpgsaveContent = JSON.stringify(meta) + '###SAVEDATA###' + compressed;
+
+        // Download
+        const baseName = encryptFile.name.replace(/----解密\.txt$/i, '').replace(/\.txt$/i, '');
+        const outName = (baseName || 'save') + '.rpgsave';
+        download(rpgsaveContent, outName, 'application/octet-stream');
+
+        encryptMsg.textContent = '加密成功！文件已下载: ' + outName;
+        encryptMsg.className = 'msg success';
+    } catch (e) {
+        encryptMsg.textContent = '错误: ' + e.message;
+        encryptMsg.className = 'msg error';
+    }
+});
+
+function download(content, filename, mimeType) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+</script>
+</body>
+</html>
