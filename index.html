@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RPGSave 加解密转换器</title>
-<script src="https://cdn.jsdelivr.net/npm/lz-string@1.5.0/libs/lz-string.min.js"></script>
+<title>RPGSave加解密转换器 V1.1</title>
+<script src="./vendor/lz-string-1.5.0.min.js"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px; }
@@ -34,7 +34,7 @@ input[type="file"] { display: none; }
 </head>
 <body>
 <div class="container">
-    <h1>RPGSave 加解密转换器</h1>
+    <h1>RPGSave加解密转换器 V1.1</h1>
 
     <!-- Decrypt: rpgsave → txt -->
     <div class="card">
@@ -69,152 +69,232 @@ input[type="file"] { display: none; }
 </div>
 
 <script>
-// ── DOM elements ──
-const $ = id => document.getElementById(id);
-const decryptDrop = $('decryptDropZone');
-const decryptInput = $('decryptInput');
-const decryptFileInfo = $('decryptFileInfo');
-const decryptBtn = $('decryptBtn');
-const decryptMsg = $('decryptMsg');
-const encryptDrop = $('encryptDropZone');
-const encryptInput = $('encryptInput');
-const encryptFileInfo = $('encryptFileInfo');
-const encryptBtn = $('encryptBtn');
-const encryptMsg = $('encryptMsg');
+(function () {
+    'use strict';
 
-let decryptFile = null;
-let encryptFile = null;
+    const saveMarker = '###SAVEDATA###';
+    const metaHeading = '========== 存档元数据 ==========';
+    const gameHeading = '========== 解密后的游戏数据 ==========';
+    const base64Pattern = /^([A-Za-z0-9+/]+)(={0,3})$/;
 
-// ── Drag & Drop helpers ──
-function setupDrop(dropZone, fileInput, onFile) {
-    dropZone.addEventListener('click', () => fileInput.click());
-    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
-    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-    dropZone.addEventListener('drop', e => {
-        e.preventDefault();
-        dropZone.classList.remove('drag-over');
-        const files = e.dataTransfer.files;
-        if (files.length) onFile(files[0]);
-    });
-    fileInput.addEventListener('change', () => {
-        if (fileInput.files.length) onFile(fileInput.files[0]);
-    });
-}
-
-// ── Decrypt side ──
-setupDrop(decryptDrop, decryptInput, file => {
-    decryptFile = file;
-    decryptFileInfo.textContent = `已选择: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
-    decryptFileInfo.classList.add('show');
-    decryptBtn.disabled = false;
-    decryptMsg.className = 'msg';
-});
-
-decryptBtn.addEventListener('click', async () => {
-    decryptMsg.className = 'msg';
-    try {
-        const text = await decryptFile.text();
-        const sep = '###SAVEDATA###';
-        const idx = text.indexOf(sep);
-        if (idx === -1) throw new Error('未找到 SAVEDATA 分隔符，不是有效的 rpgsave 文件');
-
-        const jsonMeta = text.substring(0, idx);
-        const base64Data = text.substring(idx + sep.length);
-
-        // Validate metadata JSON
-        let meta;
-        try { meta = JSON.parse(jsonMeta); } catch (e) { throw new Error('元数据 JSON 解析失败: ' + e.message); }
-
-        // Decompress
-        const decrypted = LZString.decompressFromBase64(base64Data);
-        if (!decrypted) throw new Error('LZ-String Base64 解压失败，数据可能已损坏');
-
-        // Validate game data JSON
-        let gameData;
-        try { gameData = JSON.parse(decrypted); } catch (e) { throw new Error('游戏数据 JSON 解析失败: ' + e.message); }
-
-        // Build output
-        let output = '========== 存档元数据 ==========\n';
-        output += JSON.stringify(meta, null, 2);
-        output += '\n\n========== 解密后的游戏数据 ==========\n';
-        output += JSON.stringify(gameData, null, 2);
-
-        // Download
-        const baseName = decryptFile.name.replace(/\.rpgsave$/i, '');
-        download(output, baseName + '----解密.txt', 'text/plain;charset=utf-8');
-
-        decryptMsg.textContent = '解密成功！文件已下载。';
-        decryptMsg.className = 'msg success';
-    } catch (e) {
-        decryptMsg.textContent = '错误: ' + e.message;
-        decryptMsg.className = 'msg error';
+    function trimJson(text) {
+        return text.replace(/^[\t\r\n ]+|[\t\r\n ]+$/g, '');
     }
-});
 
-// ── Encrypt side ──
-setupDrop(encryptDrop, encryptInput, file => {
-    encryptFile = file;
-    encryptFileInfo.textContent = `已选择: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
-    encryptFileInfo.classList.add('show');
-    encryptBtn.disabled = false;
-    encryptMsg.className = 'msg';
-});
+    function validateJson(text, label) {
+        try {
+            JSON.parse(text);
+        } catch (error) {
+            if (error instanceof SyntaxError) throw new Error(label + ' JSON 无效，请检查对应数据段。');
+            throw error;
+        }
+    }
 
-encryptBtn.addEventListener('click', async () => {
-    encryptMsg.className = 'msg';
-    try {
-        const text = await encryptFile.text();
+    // Format JSON tokens without turning numbers or duplicate keys into JS values.
+    function formatJson(text, pretty) {
+        const token = /"[^"\\]*(?:\\[\s\S][^"\\]*)*"|[\[{][\t\r\n ]*[\]}]|[\t\r\n ]+|[\[\]{},:]/g;
+        if (pretty && text.length > 256 * 1024) return text;
+        let depth = 0;
+        function newline() {
+            return '\n' + '  '.repeat(Math.min(depth, 20));
+        }
+        return text.replace(token, part => {
+            if (part[0] === '"') return part;
+            if (part.length > 1 && /[\[{]/.test(part[0])) return part[0] + part[part.length - 1];
+            if (/^[\t\r\n ]/.test(part)) return '';
+            if (!pretty) return part;
+            if (part === ':') return ': ';
+            if (part === ',') return ',' + newline();
+            if (part === '{' || part === '[') {
+                depth++;
+                return part + newline();
+            }
+            depth--;
+            return newline() + part;
+        });
+    }
 
-        // Extract metadata and game data from the decrypted txt
-        const metaMarker = '========== 存档元数据 ==========\n';
-        const gameMarker = '\n\n========== 解密后的游戏数据 ==========\n';
+    // Blob encodes text as UTF-8 and would replace a lone surrogate with U+FFFD.
+    function escapeLoneSurrogates(json) {
+        return json.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g, value =>
+            value.length === 2 ? value : '\\u' + value.charCodeAt(0).toString(16));
+    }
 
-        const metaStart = text.indexOf(metaMarker);
-        const gameStart = text.indexOf(gameMarker);
-
-        if (metaStart === -1 || gameStart === -1) {
-            throw new Error('txt 格式不正确，缺少元数据或游戏数据标记');
+    function unpackSave(text, lz) {
+        // Base64 cannot contain '#'; the marker may also occur inside a metadata string.
+        const index = text.lastIndexOf(saveMarker);
+        if (index === -1) {
+            if (base64Pattern.test(text.replace(/[\t\r\n ]/g, ''))) {
+                throw new Error('此文件没有 SAVEDATA 封装。标准 RPG Maker MV 等纯压缩正文格式目前不受支持。');
+            }
+            throw new Error('无法识别此存档格式：缺少 ###SAVEDATA### 分隔符。');
         }
 
-        const metaJson = text.substring(metaStart + metaMarker.length, gameStart).trim();
-        const gameJson = text.substring(gameStart + gameMarker.length).trim();
-
-        // Validate both JSON sections
-        let meta, gameData;
-        try { meta = JSON.parse(metaJson); } catch (e) { throw new Error('元数据 JSON 解析失败: ' + e.message); }
-        try { gameData = JSON.parse(gameJson); } catch (e) { throw new Error('游戏数据 JSON 解析失败: ' + e.message); }
-
-        // Compress
-        const compressed = LZString.compressToBase64(gameJson);
-        if (!compressed) throw new Error('LZ-String 压缩失败');
-
-        // Build rpgsave: raw JSON metadata (no pretty-print) + separator + compressed
-        const rpgsaveContent = JSON.stringify(meta) + '###SAVEDATA###' + compressed;
-
-        // Download
-        const baseName = encryptFile.name.replace(/----解密\.txt$/i, '').replace(/\.txt$/i, '');
-        const outName = (baseName || 'save') + '.rpgsave';
-        download(rpgsaveContent, outName, 'application/octet-stream');
-
-        encryptMsg.textContent = '加密成功！文件已下载: ' + outName;
-        encryptMsg.className = 'msg success';
-    } catch (e) {
-        encryptMsg.textContent = '错误: ' + e.message;
-        encryptMsg.className = 'msg error';
+        const meta = trimJson(text.slice(0, index));
+        validateJson(meta, '存档元数据');
+        const payload = text.slice(index + saveMarker.length).replace(/[\t\r\n ]/g, '');
+        if (!payload) throw new Error('存档缺少 SAVEDATA 压缩数据。');
+        const base64 = base64Pattern.exec(payload);
+        // LZ-String can emit three "=" characters, unlike ordinary byte Base64.
+        if (!base64 || (base64[2] && payload.length % 4 !== 0)) {
+            throw new Error('SAVEDATA 的 LZ-String Base64 格式无效。');
+        }
+        const game = lz.decompressFromBase64(base64[1]);
+        // The decoder can stop at an end code and ignore trailing characters.
+        if (!game || lz.compressToBase64(game).replace(/=+$/, '') !== base64[1]) {
+            throw new Error('SAVEDATA 压缩数据不完整、已损坏或使用了其他压缩方式。');
+        }
+        validateJson(game, '游戏数据');
+        return metaHeading + '\n' + formatJson(meta, true) + '\n\n' + gameHeading + '\n' +
+            escapeLoneSurrogates(formatJson(trimJson(game), true));
     }
-});
 
-function download(content, filename, mimeType) {
-    const blob = new Blob([content], { type: mimeType });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-}
+    function packSave(text, lz) {
+        text = text.replace(/\r\n?/g, '\n');
+        const firstLine = text.indexOf('\n');
+        const gameMarker = /\n[\t ]*========== 解密后的游戏数据 ==========[\t ]*\n/;
+        const marker = gameMarker.exec(text);
+        if (firstLine === -1 || trimJson(text.slice(0, firstLine)) !== metaHeading ||
+            !marker || marker.index < firstLine) {
+            throw new Error('不支持的 TXT 格式，请使用本工具导出的元数据和游戏数据标记。');
+        }
+
+        const meta = trimJson(text.slice(firstLine + 1, marker.index));
+        const game = trimJson(text.slice(marker.index + marker[0].length));
+        validateJson(meta, '存档元数据');
+        validateJson(game, '游戏数据');
+        return formatJson(meta, false) + saveMarker + lz.compressToBase64(game);
+    }
+
+    async function readText(file) {
+        if (typeof TextDecoder !== 'function') {
+            throw new Error('此浏览器缺少 UTF-8 文件解码功能，请使用新版浏览器。');
+        }
+        let bytes;
+        try {
+            if (typeof file.arrayBuffer === 'function') {
+                bytes = await file.arrayBuffer();
+            } else {
+                bytes = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => resolve(reader.result);
+                    reader.onerror = reader.onabort = reject;
+                    reader.readAsArrayBuffer(file);
+                });
+            }
+        } catch (error) {
+            if (error instanceof RangeError) throw error;
+            throw new Error('文件读取失败，请重新选择文件后重试。');
+        }
+
+        try {
+            return trimJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+        } catch (error) {
+            if (!(error instanceof TypeError)) throw error;
+            throw new Error('文件无法按 UTF-8 读取，可能使用了二进制存档格式、其他编码或含无效字节。');
+        }
+    }
+
+    function download(content, filename, mimeType) {
+        const a = document.createElement('a');
+        const urlApi = window.URL;
+        if (typeof Blob !== 'function' || !urlApi || typeof urlApi.createObjectURL !== 'function' ||
+            typeof urlApi.revokeObjectURL !== 'function' || !('download' in a)) {
+            throw new Error('此浏览器不支持本地文件下载，请使用新版浏览器。');
+        }
+        const url = urlApi.createObjectURL(new Blob([content], { type: mimeType }));
+        try {
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+        } finally {
+            if (a.parentNode) a.parentNode.removeChild(a);
+            // Give browsers time to start reading the Blob after the click.
+            setTimeout(() => urlApi.revokeObjectURL(url), 30000);
+        }
+    }
+
+    const $ = id => document.getElementById(id);
+    function setupConversion(prefix, convert, outputName, mimeType, successMessage) {
+        const drop = $(prefix + 'DropZone');
+        const input = $(prefix + 'Input');
+        const info = $(prefix + 'FileInfo');
+        const button = $(prefix + 'Btn');
+        const message = $(prefix + 'Msg');
+        let selection = null;
+        let busy = false;
+
+        function select(file) {
+            selection = { file };
+            info.textContent = '已选择: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)';
+            info.classList.add('show');
+            message.className = 'msg';
+            button.disabled = busy;
+        }
+
+        drop.addEventListener('click', event => {
+            if (event.target !== input) input.click();
+        });
+        drop.addEventListener('dragover', event => {
+            event.preventDefault();
+            drop.classList.add('drag-over');
+        });
+        drop.addEventListener('dragleave', () => drop.classList.remove('drag-over'));
+        drop.addEventListener('drop', event => {
+            event.preventDefault();
+            drop.classList.remove('drag-over');
+            const files = event.dataTransfer && event.dataTransfer.files;
+            if (files && files.length) select(files[0]);
+        });
+        input.addEventListener('change', () => {
+            if (input.files && input.files.length) select(input.files[0]);
+            input.value = '';
+        });
+
+        button.addEventListener('click', async () => {
+            if (!selection || busy) return;
+            const current = selection;
+            busy = true;
+            button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
+            message.className = 'msg';
+            try {
+                const lz = window.LZString;
+                if (!lz || typeof lz.compressToBase64 !== 'function' ||
+                    typeof lz.decompressFromBase64 !== 'function') {
+                    throw new Error('转换组件加载失败，请刷新页面后重试。');
+                }
+                const text = await readText(current.file);
+                if (selection !== current) return;
+                if (!text) throw new Error('文件为空或只包含空白。');
+                const output = convert(text, lz);
+                const name = outputName(current.file.name);
+                download(output, name, mimeType);
+                message.textContent = successMessage(name);
+                message.className = 'msg success';
+            } catch (error) {
+                if (selection !== current) return;
+                const detail = error instanceof RangeError
+                    ? '文件或解压后的数据超出浏览器可处理的大小。'
+                    : error.message;
+                message.textContent = '错误: ' + detail;
+                message.className = 'msg error';
+            } finally {
+                busy = false;
+                button.disabled = false;
+                button.removeAttribute('aria-busy');
+            }
+        });
+    }
+
+    setupConversion('decrypt', unpackSave,
+        name => name.replace(/\.rpgsave$/i, '') + '----解密.txt',
+        'text/plain;charset=utf-8', () => '解密成功！文件已下载。');
+    setupConversion('encrypt', packSave,
+        name => (name.replace(/(?:----解密)?\.txt$/i, '') || 'save') + '.rpgsave',
+        'application/octet-stream', name => '加密成功！文件已下载: ' + name);
+}());
 </script>
 </body>
 </html>
