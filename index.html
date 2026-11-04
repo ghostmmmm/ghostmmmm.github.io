@@ -93,10 +93,9 @@ input[type="file"] { display: none; }
     // Format JSON tokens without turning numbers or duplicate keys into JS values.
     function formatJson(text, pretty) {
         const token = /"[^"\\]*(?:\\[\s\S][^"\\]*)*"|[\[{][\t\r\n ]*[\]}]|[\t\r\n ]+|[\[\]{},:]/g;
-        if (pretty && text.length > 256 * 1024) return text;
         let depth = 0;
         function newline() {
-            return '\n' + '  '.repeat(Math.min(depth, 20));
+            return '\n' + '  '.repeat(depth);
         }
         return text.replace(token, part => {
             if (part[0] === '"') return part;
